@@ -1,11 +1,15 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+import fitz
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from delivery_order_qr_generator import (
     DeliveryRow,
+    extract_delivery,
     integer_from_ocr,
     normalized_part,
     validated_part,
@@ -33,9 +37,30 @@ class GeneratorTest(unittest.TestCase):
         self.assertEqual("TG053661-7151", validated_part(" TG053661-7151 "))
         self.assertEqual("JGF02-002190-31", validated_part("jgf02-002190-31"))
         self.assertEqual("JGC10-001180", validated_part("JGC10-001180"))
+        self.assertEqual("7521T0376", validated_part("7521T0376"))
 
     def test_invalid_part_is_rejected(self):
         self.assertIsNone(validated_part("PART NUMBER"))
+
+    def test_siam_nsk_report_uses_qty_pcs_and_box_columns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "siam_nsk.pdf"
+            document = fitz.open()
+            page = document.new_page(width=595.32, height=841.92)
+            page.insert_text((280, 42), "PARTS DELIVERY REPORT")
+            page.insert_text((350, 100), "SIAM NSK")
+            page.insert_text((48, 170), "7521T0376")
+            page.insert_text((466, 170), "3200")
+            page.insert_text((501, 170), "40")
+            document.save(path)
+            document.close()
+
+            result = extract_delivery(path)
+            self.assertEqual("SIAM_NSK", result.customer)
+            self.assertEqual(1, len(result.rows))
+            self.assertEqual("7521T0376", result.rows[0].part_no)
+            self.assertEqual(3200, result.rows[0].current_qty)
+            self.assertEqual(40, result.rows[0].number_of_boxes)
 
 
 if __name__ == "__main__":

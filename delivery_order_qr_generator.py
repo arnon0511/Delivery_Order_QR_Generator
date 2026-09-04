@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,26 @@ def configure_tesseract() -> bool:
     ])
     executable = next((path for path in candidates if path.exists()), None)
     if executable:
+        if os.name == "nt":
+            try:
+                public_dir = Path(os.environ.get("PUBLIC", "C:/Users/Public"))
+                runtime_dir = public_dir / "Documents" / "CheckTagRS_Runtime"
+                temp_dir = runtime_dir / "temp"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                os.environ["TEMP"] = str(temp_dir)
+                os.environ["TMP"] = str(temp_dir)
+                tempfile.tempdir = str(temp_dir)
+
+                # Some Windows Tesseract builds fail when their own path contains
+                # Thai or other non-ASCII characters. Cache OCR in a stable path.
+                if any(ord(char) > 127 for char in str(executable)):
+                    cached_ocr = runtime_dir / "tesseract"
+                    if not (cached_ocr / "tesseract.exe").exists():
+                        shutil.copytree(executable.parent, cached_ocr, dirs_exist_ok=True)
+                    executable = cached_ocr / "tesseract.exe"
+            except OSError:
+                # The normal portable path remains available if Public is locked.
+                pass
         pytesseract.pytesseract.tesseract_cmd = str(executable)
         tessdata = executable.parent / "tessdata"
         if tessdata.exists():
@@ -45,6 +66,7 @@ class DeliveryRow:
     current_qty: int
     number_of_boxes: int
     confidence: str = "ตรวจแล้ว"
+    source_y: float | None = None
 
     @property
     def payload(self) -> str:
@@ -70,7 +92,8 @@ def normalized_part(text: str) -> str | None:
 
 def validated_part(text: str) -> str | None:
     compact = re.sub(r"\s+", "", text.upper())
-    if re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)+", compact):
+    if (re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", compact)
+            and len(compact) >= 6 and any(char.isdigit() for char in compact)):
         return compact
     return None
 
@@ -171,9 +194,35 @@ def extract_jtcs_rows(page: fitz.Page) -> list[DeliveryRow]:
     return rows
 
 
+def extract_siam_nsk_rows(page: fitz.Page) -> list[DeliveryRow]:
+    words = page.get_text("words")
+    rows: list[DeliveryRow] = []
+    for word in words:
+        x_center = (word[0] + word[2]) / 2
+        part = normalize_document_part(word[4])
+        if not 35 <= x_center <= 115 or not re.fullmatch(r"[A-Z0-9]{8,12}", part):
+            continue
+        y = (word[1] + word[3]) / 2
+        qty = _number_near(words, y, 455, 490)
+        boxes = _number_near(words, y, 494, 515)
+        if qty is not None and boxes is not None:
+            rows.append(DeliveryRow(part, qty, boxes, "อ่านจาก SIAM NSK - กรุณาตรวจ", y))
+    return sorted(rows, key=lambda row: row.source_y or 0)
+
+
+def normalize_document_part(text: str) -> str:
+    return re.sub(r"\s+", "", text.upper())
+
+
 def extract_delivery(pdf_path: Path) -> ExtractionResult:
     document = fitz.open(pdf_path)
     page_texts = [page.get_text().upper() for page in document]
+
+    for index, text in enumerate(page_texts):
+        if "PARTS DELIVERY REPORT" in text and "SIAM NSK" in text:
+            rows = extract_siam_nsk_rows(document[index])
+            if rows:
+                return ExtractionResult("SIAM_NSK", index, rows)
 
     for index, text in enumerate(page_texts):
         if "PART DELIVERY SHEET" in text and "ORDER" in text and "KANBANS" in text:
@@ -241,6 +290,10 @@ def _card_rectangles(customer: str, page: fitz.Page, count: int) -> list[fitz.Re
     return [fitz.Rect(x, 285 + i * 205, x + size_w, 285 + i * 205 + size_h) for i in range(count)]
 
 
+def _siam_nsk_card_rectangles(rows: list[DeliveryRow]) -> list[fitz.Rect]:
+    return [fitz.Rect(522, row.source_y - 27, 582, row.source_y + 32) for row in rows if row.source_y is not None]
+
+
 def _write_dnth_single_page(source: Path, destination: Path, rows: list[DeliveryRow]) -> None:
     source_doc = fitz.open(source)
     output = fitz.open()
@@ -282,7 +335,8 @@ def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> 
         to_page=result.page_index,
     )
     page = document[0]
-    rects = _card_rectangles(result.customer, page, len(active))
+    rects = (_siam_nsk_card_rectangles(active) if result.customer == "SIAM_NSK"
+             else _card_rectangles(result.customer, page, len(active)))
     if len(rects) != len(active) or any(rect.y1 > page.rect.height - 55 for rect in rects):
         raise ValueError("พื้นที่หน้าเอกสารไม่พอสำหรับ QR กรุณาลดรายการหรือใช้หน้า QR แยก")
     for rect, row in zip(rects, active):
@@ -295,7 +349,7 @@ def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.3 Portable")
+        self.title("Delivery Order QR Generator v0.4 Portable")
         self.geometry("850x520")
         self.minsize(760, 460)
         self.pdf_path: Path | None = None

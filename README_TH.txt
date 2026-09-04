@@ -1,4 +1,4 @@
-Delivery Order QR Generator v0.3 Portable
+Delivery Order QR Generator v0.4 Portable
 ================================
 
 หน้าที่
@@ -7,9 +7,10 @@ Delivery Order QR Generator v0.3 Portable
 - DNTH: CURRENT QTY + NO. OF BOX
 - JATH: TOTAL Q'TY + ORDER KANBANS
 - JTCS: TOTAL QUANTITY + No. OF CONTAINERS
+- SIAM NSK: Q'TY PCS + Q'TY BOX และวาง QR ขนาดเล็กในช่องขวา
 - ให้ผู้ใช้ตรวจ/แก้ค่าก่อนสร้าง
 - สร้างเฉพาะหน้าสรุปสำหรับสแกน PM75 จำนวน 1 หน้า พร้อม QR
-- DNTH ใช้หน้า 1, JATH ใช้หน้า 1 และ JTCS ใช้หน้า Supplier Manifest (หน้า 2)
+- DNTH ใช้หน้า 1, JATH ใช้หน้า 1, JTCS ใช้หน้า Supplier Manifest (หน้า 2) และ SIAM NSK ใช้หน้า Parts Delivery Report
 - ไม่แนบหน้าอื่นของเอกสารต้นฉบับในไฟล์ผลลัพธ์
 - QR ใช้กับ Check Tag_RS v0.19.0
 
@@ -35,6 +36,7 @@ Delivery Order QR Generator v0.3 Portable
 - รายการ Current QTY = 0 จะแสดงคำเตือนและไม่สร้าง QR ใช้ส่งงาน
 - ถ้า OCR อ่านข้อมูลไม่ครบ โปรแกรมจะไม่เดาค่า ให้ผู้ใช้ตรวจ/แก้ก่อน
 - PM75 ตรวจ Part No. ใน QR กับ KANBAN ก่อนรับจำนวน
+- Windows Portable ใช้พื้นที่ OCR ชั่วคราวแบบอังกฤษอัตโนมัติ รองรับชื่อโฟลเดอร์ผู้ใช้ภาษาไทย
 
 รูปแบบ QR
 CHECKTAGRS|DO|PART=TG053661-7151|QTY=1100|BOX=11
