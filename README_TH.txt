@@ -1,0 +1,40 @@
+Delivery Order QR Generator v0.3 Portable
+================================
+
+หน้าที่
+- เลือก Delivery Order แบบ PDF ที่สแกนมา
+- ตรวจรูปแบบ DNTH, JATH และ JTCS อัตโนมัติ
+- DNTH: CURRENT QTY + NO. OF BOX
+- JATH: TOTAL Q'TY + ORDER KANBANS
+- JTCS: TOTAL QUANTITY + No. OF CONTAINERS
+- ให้ผู้ใช้ตรวจ/แก้ค่าก่อนสร้าง
+- สร้างเฉพาะหน้าสรุปสำหรับสแกน PM75 จำนวน 1 หน้า พร้อม QR
+- DNTH ใช้หน้า 1, JATH ใช้หน้า 1 และ JTCS ใช้หน้า Supplier Manifest (หน้า 2)
+- ไม่แนบหน้าอื่นของเอกสารต้นฉบับในไฟล์ผลลัพธ์
+- QR ใช้กับ Check Tag_RS v0.19.0
+
+ติดตั้งและใช้งานแบบ Portable EXE
+1. ดาวน์โหลด Artifact ชื่อ Delivery-Order-QR-Generator-Windows-Portable
+2. แตก ZIP ให้ครบทั้งโฟลเดอร์ (ห้ามเปิด EXE จากใน ZIP)
+3. เปิด Delivery_Order_QR_Generator.exe
+4. ไม่ต้องติดตั้ง Python และไม่ต้องติดตั้ง Tesseract OCR แยก
+
+ใช้งาน
+1. เปิด Delivery_Order_QR_Generator.exe
+2. กด "เลือก Delivery Order PDF"
+3. ตรวจ Part No., Current QTY และ NO. OF BOX
+4. ดับเบิลคลิกรายการหากต้องแก้ค่า
+5. กด "สร้าง PDF พร้อม QR"
+
+การ Build จาก Source
+- เปิด GitHub Actions แล้วรัน Build Windows Portable EXE
+- ดาวน์โหลด Artifact ที่ได้ ไม่ต้อง Build บนคอมผู้ใช้งาน
+
+กฎความปลอดภัย
+- โปรแกรมไม่แก้ไฟล์ PDF ต้นฉบับ
+- รายการ Current QTY = 0 จะแสดงคำเตือนและไม่สร้าง QR ใช้ส่งงาน
+- ถ้า OCR อ่านข้อมูลไม่ครบ โปรแกรมจะไม่เดาค่า ให้ผู้ใช้ตรวจ/แก้ก่อน
+- PM75 ตรวจ Part No. ใน QR กับ KANBAN ก่อนรับจำนวน
+
+รูปแบบ QR
+CHECKTAGRS|DO|PART=TG053661-7151|QTY=1100|BOX=11

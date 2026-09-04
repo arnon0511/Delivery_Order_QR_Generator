@@ -1,0 +1,4 @@
+PyMuPDF==1.26.4
+Pillow==11.3.0
+pytesseract==0.3.13
+qrcode==8.2

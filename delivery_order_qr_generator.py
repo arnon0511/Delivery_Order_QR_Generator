@@ -1,0 +1,399 @@
+from __future__ import annotations
+
+import io
+import os
+import re
+import shutil
+import sys
+import tkinter as tk
+from dataclasses import dataclass
+from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+import fitz
+import pytesseract
+import qrcode
+from PIL import Image, ImageDraw, ImageFont
+
+
+def configure_tesseract() -> bool:
+    """Use the portable OCR bundled beside the Windows executable when present."""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "tesseract" / "tesseract.exe")
+    candidates.extend([
+        Path("C:/Program Files/Tesseract-OCR/tesseract.exe"),
+        Path("C:/Program Files (x86)/Tesseract-OCR/tesseract.exe"),
+    ])
+    executable = next((path for path in candidates if path.exists()), None)
+    if executable:
+        pytesseract.pytesseract.tesseract_cmd = str(executable)
+        tessdata = executable.parent / "tessdata"
+        if tessdata.exists():
+            os.environ["TESSDATA_PREFIX"] = str(tessdata)
+        return True
+    system_tesseract = shutil.which("tesseract")
+    if system_tesseract:
+        pytesseract.pytesseract.tesseract_cmd = system_tesseract
+        return True
+    return False
+
+
+@dataclass
+class DeliveryRow:
+    part_no: str
+    current_qty: int
+    number_of_boxes: int
+    confidence: str = "ตรวจแล้ว"
+
+    @property
+    def payload(self) -> str:
+        return (
+            f"CHECKTAGRS|DO|PART={self.part_no}|"
+            f"QTY={self.current_qty}|BOX={self.number_of_boxes}"
+        )
+
+
+@dataclass
+class ExtractionResult:
+    customer: str
+    page_index: int
+    rows: list[DeliveryRow]
+
+
+def normalized_part(text: str) -> str | None:
+    compact = re.sub(r"[^A-Z0-9-]", "", text.upper())
+    # DNTH OCR commonly reads the printed TG prefix as T6, 7G or 16.
+    match = re.fullmatch(r"[A-Z0-9]{2}(\d{6})-([A-Z0-9]{4,10})", compact)
+    return f"TG{match.group(1)}-{match.group(2)}" if match else None
+
+
+def validated_part(text: str) -> str | None:
+    compact = re.sub(r"\s+", "", text.upper())
+    if re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)+", compact):
+        return compact
+    return None
+
+
+def integer_from_ocr(text: str) -> int | None:
+    cleaned = text.strip().replace(",", "").replace("O", "0").replace("o", "0")
+    match = re.search(r"\d+(?:\.\d+)?", cleaned)
+    if not match:
+        return None
+    return int(round(float(match.group())))
+
+
+def extract_dnth_rows(pdf_path: Path) -> list[DeliveryRow]:
+    document = fitz.open(pdf_path)
+    if document.page_count < 1:
+        raise ValueError("PDF ไม่มีหน้าเอกสาร")
+    page = document[0]
+    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+    image = Image.open(io.BytesIO(pix.tobytes("png")))
+    data = pytesseract.image_to_data(
+        image, config="--psm 6", output_type=pytesseract.Output.DICT
+    )
+
+    width = image.width
+    lines: dict[tuple[int, int, int], list[dict]] = {}
+    for index, text in enumerate(data["text"]):
+        if not text.strip():
+            continue
+        key = (data["block_num"][index], data["par_num"][index], data["line_num"][index])
+        lines.setdefault(key, []).append(
+            {
+                "text": text,
+                "cx": (data["left"][index] + data["width"][index] / 2) / width,
+                "conf": float(data["conf"][index]),
+            }
+        )
+
+    rows: list[DeliveryRow] = []
+    seen: set[str] = set()
+    for words in lines.values():
+        parts = [normalized_part(w["text"].strip("|“”'\"")) for w in words]
+        parts = [part for part in parts if part]
+        if not parts:
+            continue
+        part = parts[0]
+        if part in seen:
+            continue
+
+        box_candidates = [integer_from_ocr(w["text"]) for w in words if 0.56 <= w["cx"] <= 0.65]
+        qty_candidates = [integer_from_ocr(w["text"]) for w in words if 0.68 <= w["cx"] <= 0.77]
+        boxes = next((value for value in box_candidates if value is not None), None)
+        qty = next((value for value in qty_candidates if value is not None), None)
+        if boxes is None or qty is None:
+            continue
+        seen.add(part)
+        rows.append(DeliveryRow(part, qty, boxes, "OCR - กรุณาตรวจ"))
+
+    if not rows:
+        raise ValueError("อ่านตารางไม่สำเร็จ กรุณาตรวจความคมชัดหรือหมุนเอกสารให้ถูกด้าน")
+    return rows
+
+
+def _number_near(words: list[tuple], y: float, x_min: float, x_max: float) -> int | None:
+    candidates = [
+        w for w in words
+        if x_min <= (w[0] + w[2]) / 2 <= x_max and abs(((w[1] + w[3]) / 2) - y) <= 8
+    ]
+    return integer_from_ocr(candidates[0][4]) if candidates else None
+
+
+def extract_jath_rows(page: fitz.Page) -> list[DeliveryRow]:
+    words = page.get_text("words")
+    rows: list[DeliveryRow] = []
+    for word in words:
+        part = word[4].strip().upper()
+        if not re.fullmatch(r"J[A-Z]{2}\d{2}-\d{6}-\d{2}", part):
+            continue
+        y = (word[1] + word[3]) / 2
+        boxes = _number_near(words, y, 480, 515)
+        qty = _number_near(words, y, 535, 575)
+        if boxes is not None and qty is not None:
+            rows.append(DeliveryRow(part, qty, boxes, "อ่านจาก JATH PDS - กรุณาตรวจ"))
+    return rows
+
+
+def extract_jtcs_rows(page: fitz.Page) -> list[DeliveryRow]:
+    words = page.get_text("words")
+    rows: list[DeliveryRow] = []
+    for word in words:
+        part = word[4].strip().upper()
+        if not re.fullmatch(r"J[A-Z]{2}\d{2}-[A-Z0-9-]{6,16}", part):
+            continue
+        y = (word[1] + word[3]) / 2
+        boxes = _number_near(words, y, 255, 300)
+        qty = _number_near(words, y, 315, 365)
+        if boxes is not None and qty is not None:
+            rows.append(DeliveryRow(part, qty, boxes, "อ่านจาก JTCS Manifest - กรุณาตรวจ"))
+    return rows
+
+
+def extract_delivery(pdf_path: Path) -> ExtractionResult:
+    document = fitz.open(pdf_path)
+    page_texts = [page.get_text().upper() for page in document]
+
+    for index, text in enumerate(page_texts):
+        if "PART DELIVERY SHEET" in text and "ORDER" in text and "KANBANS" in text:
+            rows = extract_jath_rows(document[index])
+            if rows:
+                return ExtractionResult("JATH", index, rows)
+
+    for index, text in enumerate(page_texts):
+        if "SUPPLIER MANIFEST" in text and "CONTAINERS" in text:
+            rows = extract_jtcs_rows(document[index])
+            if rows:
+                return ExtractionResult("JTCS", index, rows)
+
+    rows = extract_dnth_rows(pdf_path)
+    return ExtractionResult("DNTH", 0, rows)
+
+
+def make_qr_png(payload: str) -> bytes:
+    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M,
+                       box_size=8, border=3)
+    qr.add_data(payload)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def make_qr_card(row: DeliveryRow) -> bytes:
+    qr = Image.open(io.BytesIO(make_qr_png(row.payload))).convert("RGB").resize((520, 520))
+    card = Image.new("RGB", (620, 660), "white")
+    card.paste(qr, (50, 18))
+    draw = ImageDraw.Draw(card)
+    font_paths = [
+        Path("C:/Windows/Fonts/consola.ttf"),
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+    ]
+    font_path = next((path for path in font_paths if path.exists()), None)
+    font = ImageFont.truetype(str(font_path), 30) if font_path else ImageFont.load_default()
+    small = ImageFont.truetype(str(font_path), 26) if font_path else ImageFont.load_default()
+    draw.text((310, 555), row.part_no, anchor="mm", fill="black", font=font)
+    draw.text((310, 610), f"QTY {row.current_qty:,} | BOX {row.number_of_boxes}", anchor="mm", fill="black", font=small)
+    stream = io.BytesIO()
+    card.save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def _card_rectangles(customer: str, page: fitz.Page, count: int) -> list[fitz.Rect]:
+    if customer == "JATH":
+        size_w, size_h, start_y = 150.0, 160.0, 325.0
+        gap = (page.rect.width - min(count, 3) * size_w) / (min(count, 3) + 1)
+        return [fitz.Rect(gap + (i % 3) * (size_w + gap), start_y + (i // 3) * 175,
+                          gap + (i % 3) * (size_w + gap) + size_w, start_y + (i // 3) * 175 + size_h)
+                for i in range(count)]
+    if customer == "JTCS":
+        size_w, size_h, start_y = 112.0, 120.0, 540.0
+        gap = (page.rect.width - min(count, 4) * size_w) / (min(count, 4) + 1)
+        return [fitz.Rect(gap + (i % 4) * (size_w + gap), start_y + (i // 4) * 135,
+                          gap + (i % 4) * (size_w + gap) + size_w, start_y + (i // 4) * 135 + size_h)
+                for i in range(count)]
+    # DNTH uses a portrait scan with a large blank centre.
+    size_w, size_h = 175.0, 186.0
+    x = (page.rect.width - size_w) / 2
+    return [fitz.Rect(x, 285 + i * 205, x + size_w, 285 + i * 205 + size_h) for i in range(count)]
+
+
+def _write_dnth_single_page(source: Path, destination: Path, rows: list[DeliveryRow]) -> None:
+    source_doc = fitz.open(source)
+    output = fitz.open()
+    original_page = source_doc[0]
+    pix = original_page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+    background = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+    active = [row for row in rows if row.current_qty > 0 and row.number_of_boxes > 0]
+    page_w, page_h = original_page.rect.width, original_page.rect.height
+    for rect, row in zip(_card_rectangles("DNTH", original_page, len(active)), active):
+        card = Image.open(io.BytesIO(make_qr_card(row))).convert("RGB")
+        pixel_rect = (
+            int(rect.x0 / page_w * background.width), int(rect.y0 / page_h * background.height),
+            int(rect.x1 / page_w * background.width), int(rect.y1 / page_h * background.height),
+        )
+        card = card.resize((pixel_rect[2] - pixel_rect[0], pixel_rect[3] - pixel_rect[1]))
+        background.paste(card, pixel_rect[:2])
+    stream = io.BytesIO()
+    background.save(stream, format="PNG")
+    new_page = output.new_page(width=page_w, height=page_h)
+    new_page.insert_image(new_page.rect, stream=stream.getvalue())
+    output.save(destination, garbage=4, deflate=True)
+
+
+def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> None:
+    rows = result.rows
+    active = [row for row in rows if row.current_qty > 0 and row.number_of_boxes > 0]
+    if not active:
+        raise ValueError("ไม่มีรายการ Current QTY และ NO. OF BOX มากกว่า 0")
+
+    if result.customer == "DNTH":
+        _write_dnth_single_page(source, destination, rows)
+        return
+
+    source_document = fitz.open(source)
+    document = fitz.open()
+    document.insert_pdf(
+        source_document,
+        from_page=result.page_index,
+        to_page=result.page_index,
+    )
+    page = document[0]
+    rects = _card_rectangles(result.customer, page, len(active))
+    if len(rects) != len(active) or any(rect.y1 > page.rect.height - 55 for rect in rects):
+        raise ValueError("พื้นที่หน้าเอกสารไม่พอสำหรับ QR กรุณาลดรายการหรือใช้หน้า QR แยก")
+    for rect, row in zip(rects, active):
+        page.insert_image(rect, stream=make_qr_card(row), keep_proportion=True, overlay=True)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    document.save(destination, garbage=4, deflate=True)
+
+
+class App(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("Delivery Order QR Generator v0.3 Portable")
+        self.geometry("850x520")
+        self.minsize(760, 460)
+        self.pdf_path: Path | None = None
+        self.rows: list[DeliveryRow] = []
+        self.result: ExtractionResult | None = None
+
+        ttk.Label(self, text="Delivery Order QR Generator", font=("Segoe UI", 19, "bold")).pack(pady=(18, 4))
+        ttk.Label(self, text="อ่าน Current QTY และ NO. OF BOX แล้วเพิ่ม QR โดยไม่แก้ไฟล์ต้นฉบับ").pack()
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", padx=24, pady=16)
+        ttk.Button(bar, text="1. เลือก Delivery Order PDF", command=self.open_pdf).pack(side="left")
+        ttk.Button(bar, text="2. แก้รายการที่เลือก", command=self.edit_selected).pack(side="left", padx=8)
+        ttk.Button(bar, text="3. สร้าง PDF พร้อม QR", command=self.generate).pack(side="right")
+
+        self.file_label = ttk.Label(self, text="ยังไม่ได้เลือกไฟล์")
+        self.file_label.pack(fill="x", padx=24)
+
+        columns = ("part", "qty", "box", "status")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=14)
+        for key, title, width in [
+            ("part", "Part No.", 220), ("qty", "Current QTY", 150),
+            ("box", "NO. OF BOX", 150), ("status", "สถานะ", 220)
+        ]:
+            self.tree.heading(key, text=title)
+            self.tree.column(key, width=width, anchor="center")
+        self.tree.pack(fill="both", expand=True, padx=24, pady=12)
+        self.tree.bind("<Double-1>", lambda _event: self.edit_selected())
+        ttk.Label(self, text="ต้องตรวจค่าก่อนสร้างทุกครั้ง • QTY = 0 จะไม่สร้าง QR ส่งงาน", foreground="#b42318").pack(pady=(0, 16))
+
+    def refresh(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for index, row in enumerate(self.rows):
+            status = "ไม่สร้าง QR: QTY เป็น 0" if row.current_qty <= 0 else row.confidence
+            self.tree.insert("", "end", iid=str(index), values=(row.part_no, f"{row.current_qty:,}", row.number_of_boxes, status))
+
+    def open_pdf(self) -> None:
+        selected = filedialog.askopenfilename(title="เลือก Delivery Order", filetypes=[("PDF", "*.pdf")])
+        if not selected:
+            return
+        try:
+            self.pdf_path = Path(selected)
+            self.file_label.configure(text=str(self.pdf_path))
+            self.result = extract_delivery(self.pdf_path)
+            self.rows = self.result.rows
+            self.file_label.configure(text=f"{self.pdf_path}   |   ลูกค้า: {self.result.customer}   |   หน้า QR: {self.result.page_index + 1}")
+            self.refresh()
+        except Exception as error:
+            messagebox.showerror("อ่าน PDF ไม่สำเร็จ", str(error))
+
+    def edit_selected(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("เลือกรายการ", "กรุณาเลือกรายการที่ต้องการแก้")
+            return
+        index = int(selected[0])
+        row = self.rows[index]
+        part = simpledialog.askstring("Part No.", "Part No.", initialvalue=row.part_no, parent=self)
+        if part is None:
+            return
+        qty = simpledialog.askinteger("Current QTY", "Current QTY", initialvalue=row.current_qty, minvalue=0, parent=self)
+        if qty is None:
+            return
+        boxes = simpledialog.askinteger("NO. OF BOX", "NO. OF BOX", initialvalue=row.number_of_boxes, minvalue=0, parent=self)
+        if boxes is None:
+            return
+        checked_part = validated_part(part)
+        if not checked_part:
+            messagebox.showerror("Part No. ไม่ถูกต้อง", "กรุณาตรวจ Part No.")
+            return
+        self.rows[index] = DeliveryRow(checked_part, qty, boxes, "ผู้ใช้ตรวจแล้ว")
+        self.refresh()
+
+    def generate(self) -> None:
+        if not self.pdf_path or not self.rows or self.result is None:
+            messagebox.showinfo("ยังไม่มีข้อมูล", "กรุณาเลือก Delivery Order PDF ก่อน")
+            return
+        destination = filedialog.asksaveasfilename(
+            title="บันทึก PDF พร้อม QR",
+            initialfile=f"{self.pdf_path.stem}_PM75_ONE_PAGE.pdf",
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")]
+        )
+        if not destination:
+            return
+        try:
+            self.result.rows = self.rows
+            add_qr_to_pdf(self.pdf_path, Path(destination), self.result)
+            messagebox.showinfo("สำเร็จ", f"สร้างไฟล์แล้ว\n{destination}")
+        except Exception as error:
+            messagebox.showerror("สร้าง PDF ไม่สำเร็จ", str(error))
+
+
+if __name__ == "__main__":
+    if not configure_tesseract():
+        messagebox.showerror(
+            "ไม่พบ Tesseract OCR",
+            "ชุดโปรแกรมไม่สมบูรณ์: ไม่พบโฟลเดอร์ tesseract กรุณาแตก ZIP ใหม่ทั้งชุด"
+        )
+    else:
+        App().mainloop()
