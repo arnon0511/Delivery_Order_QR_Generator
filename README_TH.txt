@@ -1,4 +1,15 @@
-Delivery Order QR Generator v0.5.1 Portable
+Delivery Order QR Generator v0.5.3 Portable
+
+เพิ่มใน v0.5.3
+- รองรับ DNTH แบบ KANBAN DELIVERY ORDER ที่สร้างจาก JasperReports
+- อ่านตำแหน่ง NO. OF BOX และ CURRENT QTY จากหัวตารางจริง
+- รองรับแถวที่ช่อง RCV LANE ว่าง
+- หากเป็นใบสแกนแบบเดิมจะใช้ OCR สำรองเหมือนเดิม
+- DNTH ตั้งแต่ 3 รายการขึ้นไปวาง QR แบบ 2 คอลัมน์ในหน้าเดียว
+
+แก้ไขใน v0.5.2
+- ปรับขนาดหน้าต่าง Preview ตามความสูงจริงของหน้าจอ
+- ป้องกันปุ่มยืนยันและปุ่มเลือกไฟล์ใหม่ซ่อนอยู่หลัง Windows Taskbar
 
 แก้ไขใน v0.5.1
 - แยกปุ่มยืนยันไว้ในแถบด้านล่าง เพื่อให้มองเห็นแม้ Windows ตั้ง Scale สูง

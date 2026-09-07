@@ -106,11 +106,87 @@ def integer_from_ocr(text: str) -> int | None:
     return int(round(float(match.group())))
 
 
+def extract_dnth_text_rows(page: fitz.Page) -> list[DeliveryRow]:
+    """Read native-text DNTH tables by their headers, not fixed row positions."""
+    words = page.get_text("words")
+    if not words:
+        return []
+    page_text = page.get_text().upper()
+    if "DELIVERY ORDER" not in page_text or "CURRENT" not in page_text:
+        return []
+
+    def cx(word: tuple) -> float:
+        return (word[0] + word[2]) / 2
+
+    def cy(word: tuple) -> float:
+        return (word[1] + word[3]) / 2
+
+    # Locate the actual NO. OF BOX and CURRENT QTY headers. The newer DNTH
+    # layout moves these columns to the right and some rows omit RCV LANE.
+    box_headers = [
+        word for word in words
+        if word[4].upper() == "BOX"
+        and any(other[4].upper() == "OF" and abs(cy(other) - cy(word)) <= 12
+                and abs(cx(word) - cx(other)) < 35 for other in words)
+    ]
+    qty_headers = [
+        word for word in words
+        if word[4].upper() == "QTY"
+        and any(other[4].upper() == "CURRENT" and abs(cx(other) - cx(word)) <= 30
+                and abs(cy(other) - cy(word)) <= 15 for other in words)
+    ]
+    if not box_headers or not qty_headers:
+        return []
+
+    box_x = cx(box_headers[0])
+    qty_x = min((cx(word) for word in qty_headers if cx(word) > box_x), default=None)
+    if qty_x is None:
+        return []
+    next_column_x = min(
+        (cx(word) for word in words
+         if word[4].upper() == "CURRENT" and cx(word) > qty_x + 20),
+        default=page.rect.width,
+    )
+    previous_column_x = max(
+        (cx(word) for word in words
+         if word[4].upper() in {"/BOX", "QUANTITY"} and cx(word) < box_x),
+        default=box_x - (qty_x - box_x),
+    )
+    box_min = (previous_column_x + box_x) / 2
+    box_max = (box_x + qty_x) / 2
+    qty_min = box_max
+    qty_max = (qty_x + next_column_x) / 2
+
+    rows: list[DeliveryRow] = []
+    seen: set[tuple[str, int]] = set()
+    for part_word in words:
+        part = validated_part(part_word[4])
+        if not part or not part.startswith("TG"):
+            continue
+        row_y = cy(part_word)
+        row_key = (part, round(row_y))
+        if row_key in seen:
+            continue
+        same_row = [word for word in words if abs(cy(word) - row_y) <= 4]
+        box_values = [integer_from_ocr(word[4]) for word in same_row if box_min <= cx(word) < box_max]
+        qty_values = [integer_from_ocr(word[4]) for word in same_row if qty_min <= cx(word) < qty_max]
+        boxes = next((value for value in box_values if value is not None), None)
+        qty = next((value for value in qty_values if value is not None), None)
+        if boxes is None or qty is None:
+            continue
+        seen.add(row_key)
+        rows.append(DeliveryRow(part, qty, boxes, "อ่านจาก DNTH PDF - กรุณาตรวจ", row_y))
+    return sorted(rows, key=lambda row: row.source_y or 0)
+
+
 def extract_dnth_rows(pdf_path: Path) -> list[DeliveryRow]:
     document = fitz.open(pdf_path)
     if document.page_count < 1:
         raise ValueError("PDF ไม่มีหน้าเอกสาร")
     page = document[0]
+    text_rows = extract_dnth_text_rows(page)
+    if text_rows:
+        return text_rows
     pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
     image = Image.open(io.BytesIO(pix.tobytes("png")))
     data = pytesseract.image_to_data(
@@ -284,7 +360,20 @@ def _card_rectangles(customer: str, page: fitz.Page, count: int) -> list[fitz.Re
         return [fitz.Rect(gap + (i % 4) * (size_w + gap), start_y + (i // 4) * 135,
                           gap + (i % 4) * (size_w + gap) + size_w, start_y + (i // 4) * 135 + size_h)
                 for i in range(count)]
-    # DNTH uses a portrait scan with a large blank centre.
+    # DNTH uses a portrait page with a large blank centre. Use two columns for
+    # three or more items so every QR remains on the original single page.
+    if count >= 3:
+        size_w, size_h, start_y = 145.0, 154.0, 300.0
+        gap_x = (page.rect.width - 2 * size_w) / 3
+        return [
+            fitz.Rect(
+                gap_x + (i % 2) * (size_w + gap_x),
+                start_y + (i // 2) * 168,
+                gap_x + (i % 2) * (size_w + gap_x) + size_w,
+                start_y + (i // 2) * 168 + size_h,
+            )
+            for i in range(count)
+        ]
     size_w, size_h = 175.0, 186.0
     x = (page.rect.width - size_w) / 2
     return [fitz.Rect(x, 285 + i * 205, x + size_w, 285 + i * 205 + size_h) for i in range(count)]
@@ -349,7 +438,7 @@ def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.5.1 Portable")
+        self.title("Delivery Order QR Generator v0.5.3 Portable")
         self.geometry("850x520")
         self.minsize(760, 460)
         self.pdf_path: Path | None = None
@@ -405,8 +494,15 @@ class App(tk.Tk):
 
         preview = tk.Toplevel(self)
         preview.title("ตรวจสอบไฟล์ Delivery Order ก่อนใช้งาน")
-        preview.geometry("900x760")
-        preview.minsize(700, 560)
+        # Fit inside the usable screen on small displays and high DPI scaling.
+        # A fixed 760px window can otherwise put the action buttons behind the
+        # Windows taskbar on a 768px-high display.
+        screen_w = preview.winfo_screenwidth()
+        screen_h = preview.winfo_screenheight()
+        window_w = max(680, min(1000, screen_w - 80))
+        window_h = max(500, min(720, screen_h - 140))
+        preview.geometry(f"{window_w}x{window_h}+{max(20, (screen_w - window_w) // 2)}+20")
+        preview.minsize(640, 480)
         preview.transient(self)
         preview.grab_set()
 

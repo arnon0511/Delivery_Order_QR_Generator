@@ -62,6 +62,40 @@ class GeneratorTest(unittest.TestCase):
             self.assertEqual(3200, result.rows[0].current_qty)
             self.assertEqual(40, result.rows[0].number_of_boxes)
 
+    def test_native_dnth_kanban_delivery_order_uses_header_columns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "dnth_native.pdf"
+            document = fitz.open()
+            page = document.new_page(width=595, height=842)
+            page.insert_text((210, 80), "KANBAN DELIVERY ORDER")
+            page.insert_text((420, 180), "NO. OF")
+            page.insert_text((424, 190), "BOX")
+            page.insert_text((475, 180), "CURRENT")
+            page.insert_text((484, 190), "QTY")
+            page.insert_text((533, 180), "CURRENT")
+            for y, part, boxes, qty in [
+                (210, "TG028211-6190", "10.00", "500.00"),
+                (230, "TG028993-6160", "10.00", "200.00"),
+                (250, "TG053661-7020S2", "30.00", "3,000.00"),
+            ]:
+                page.insert_text((97, y), part)
+                page.insert_text((162, y), part)
+                page.insert_text((444, y), boxes)
+                page.insert_text((496, y), qty)
+            document.save(path)
+            document.close()
+
+            result = extract_delivery(path)
+            self.assertEqual("DNTH", result.customer)
+            self.assertEqual(
+                [
+                    ("TG028211-6190", 500, 10),
+                    ("TG028993-6160", 200, 10),
+                    ("TG053661-7020S2", 3000, 30),
+                ],
+                [(row.part_no, row.current_qty, row.number_of_boxes) for row in result.rows],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
