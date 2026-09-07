@@ -349,7 +349,7 @@ def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.5 Portable")
+        self.title("Delivery Order QR Generator v0.5.1 Portable")
         self.geometry("850x520")
         self.minsize(760, 460)
         self.pdf_path: Path | None = None
@@ -464,17 +464,25 @@ class App(tk.Tk):
             close_preview()
             self.after(50, self.open_pdf)
 
-        controls = ttk.Frame(preview)
-        controls.pack(fill="x", padx=12, pady=(0, 8))
-        ttk.Button(controls, text="◀ หน้าก่อนหน้า", command=lambda: change_page(-1)).pack(side="left")
-        ttk.Button(controls, text="หน้าถัดไป ▶", command=lambda: change_page(1)).pack(side="left", padx=6)
-        ttk.Label(controls, textvariable=page_text).pack(side="left", padx=12)
-        ttk.Button(controls, text="− ย่อ", command=lambda: change_zoom(-0.2)).pack(side="left")
-        ttk.Button(controls, text="+ ขยาย", command=lambda: change_zoom(0.2)).pack(side="left", padx=6)
-        ttk.Button(controls, text="เลือกไฟล์ใหม่", command=choose_another_file).pack(side="right")
-        ttk.Button(controls, text="ยืนยันใช้ไฟล์นี้", command=accept_file).pack(side="right", padx=8)
+        # Keep navigation and confirmation on separate rows. This prevents the
+        # confirmation button from being pushed off-screen by Windows scaling.
+        navigation = ttk.Frame(preview)
+        navigation.pack(fill="x", padx=12, pady=(0, 6))
+        ttk.Button(navigation, text="◀ หน้าก่อนหน้า", command=lambda: change_page(-1)).pack(side="left")
+        ttk.Button(navigation, text="หน้าถัดไป ▶", command=lambda: change_page(1)).pack(side="left", padx=6)
+        ttk.Label(navigation, textvariable=page_text).pack(side="left", padx=12)
+        ttk.Button(navigation, text="+ ขยาย", command=lambda: change_zoom(0.2)).pack(side="right")
+        ttk.Button(navigation, text="− ย่อ", command=lambda: change_zoom(-0.2)).pack(side="right", padx=6)
+
+        actions = ttk.Frame(preview)
+        actions.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(actions, text="เลือกไฟล์ใหม่", command=choose_another_file).pack(side="left")
+        confirm_button = ttk.Button(actions, text="ยืนยันใช้ไฟล์นี้", command=accept_file)
+        confirm_button.pack(side="right", ipadx=18, ipady=5)
 
         preview.protocol("WM_DELETE_WINDOW", close_preview)
+        preview.bind("<Return>", lambda _event: accept_file())
+        preview.bind("<Escape>", lambda _event: close_preview())
         render_page()
 
     def load_confirmed_pdf(self, selected_path: Path) -> None:

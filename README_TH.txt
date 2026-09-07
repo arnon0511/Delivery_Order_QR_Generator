@@ -1,4 +1,8 @@
-Delivery Order QR Generator v0.5 Portable
+Delivery Order QR Generator v0.5.1 Portable
+
+แก้ไขใน v0.5.1
+- แยกปุ่มยืนยันไว้ในแถบด้านล่าง เพื่อให้มองเห็นแม้ Windows ตั้ง Scale สูง
+- กด Enter เพื่อยืนยันไฟล์ หรือ Esc เพื่อปิดหน้าตัวอย่างได้
 
 เพิ่มใน v0.5
 - หลังเลือก PDF โปรแกรมจะแสดงตัวอย่างเอกสารก่อนอ่านข้อมูล
