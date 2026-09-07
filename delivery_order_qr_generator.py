@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 import fitz
 import pytesseract
 import qrcode
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 
 def configure_tesseract() -> bool:
@@ -349,7 +349,7 @@ def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.4 Portable")
+        self.title("Delivery Order QR Generator v0.5 Portable")
         self.geometry("850x520")
         self.minsize(760, 460)
         self.pdf_path: Path | None = None
@@ -390,12 +390,102 @@ class App(tk.Tk):
         selected = filedialog.askopenfilename(title="เลือก Delivery Order", filetypes=[("PDF", "*.pdf")])
         if not selected:
             return
+        self.preview_pdf(Path(selected))
+
+    def preview_pdf(self, selected_path: Path) -> None:
+        """Show every PDF page before accepting the document for extraction."""
         try:
-            self.pdf_path = Path(selected)
-            self.file_label.configure(text=str(self.pdf_path))
-            self.result = extract_delivery(self.pdf_path)
-            self.rows = self.result.rows
-            self.file_label.configure(text=f"{self.pdf_path}   |   ลูกค้า: {self.result.customer}   |   หน้า QR: {self.result.page_index + 1}")
+            document = fitz.open(selected_path)
+            if document.page_count < 1:
+                document.close()
+                raise ValueError("PDF ไม่มีหน้าเอกสาร")
+        except Exception as error:
+            messagebox.showerror("เปิดตัวอย่าง PDF ไม่สำเร็จ", str(error))
+            return
+
+        preview = tk.Toplevel(self)
+        preview.title("ตรวจสอบไฟล์ Delivery Order ก่อนใช้งาน")
+        preview.geometry("900x760")
+        preview.minsize(700, 560)
+        preview.transient(self)
+        preview.grab_set()
+
+        page_index = tk.IntVar(value=0)
+        zoom = tk.DoubleVar(value=1.0)
+        page_text = tk.StringVar()
+        photo_holder: dict[str, ImageTk.PhotoImage] = {}
+
+        ttk.Label(preview, text=selected_path.name, font=("Segoe UI", 12, "bold")).pack(pady=(10, 2))
+        ttk.Label(preview, text=str(selected_path), foreground="#555555").pack(padx=16)
+
+        viewer_frame = ttk.Frame(preview)
+        viewer_frame.pack(fill="both", expand=True, padx=12, pady=10)
+        canvas = tk.Canvas(viewer_frame, background="#777777", highlightthickness=0)
+        vertical = ttk.Scrollbar(viewer_frame, orient="vertical", command=canvas.yview)
+        horizontal = ttk.Scrollbar(viewer_frame, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        viewer_frame.rowconfigure(0, weight=1)
+        viewer_frame.columnconfigure(0, weight=1)
+
+        def render_page() -> None:
+            matrix = fitz.Matrix(1.35 * zoom.get(), 1.35 * zoom.get())
+            pix = document[page_index.get()].get_pixmap(matrix=matrix, alpha=False)
+            image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+            photo = ImageTk.PhotoImage(image)
+            photo_holder["page"] = photo
+            canvas.delete("all")
+            canvas.create_image(12, 12, image=photo, anchor="nw")
+            canvas.configure(scrollregion=(0, 0, image.width + 24, image.height + 24))
+            canvas.xview_moveto(0)
+            canvas.yview_moveto(0)
+            page_text.set(f"หน้า {page_index.get() + 1} / {document.page_count}   •   ซูม {int(zoom.get() * 100)}%")
+
+        def change_page(step: int) -> None:
+            page_index.set(max(0, min(document.page_count - 1, page_index.get() + step)))
+            render_page()
+
+        def change_zoom(step: float) -> None:
+            zoom.set(max(0.6, min(2.0, round(zoom.get() + step, 1))))
+            render_page()
+
+        def close_preview() -> None:
+            document.close()
+            preview.grab_release()
+            preview.destroy()
+
+        def accept_file() -> None:
+            close_preview()
+            self.load_confirmed_pdf(selected_path)
+
+        def choose_another_file() -> None:
+            close_preview()
+            self.after(50, self.open_pdf)
+
+        controls = ttk.Frame(preview)
+        controls.pack(fill="x", padx=12, pady=(0, 8))
+        ttk.Button(controls, text="◀ หน้าก่อนหน้า", command=lambda: change_page(-1)).pack(side="left")
+        ttk.Button(controls, text="หน้าถัดไป ▶", command=lambda: change_page(1)).pack(side="left", padx=6)
+        ttk.Label(controls, textvariable=page_text).pack(side="left", padx=12)
+        ttk.Button(controls, text="− ย่อ", command=lambda: change_zoom(-0.2)).pack(side="left")
+        ttk.Button(controls, text="+ ขยาย", command=lambda: change_zoom(0.2)).pack(side="left", padx=6)
+        ttk.Button(controls, text="เลือกไฟล์ใหม่", command=choose_another_file).pack(side="right")
+        ttk.Button(controls, text="ยืนยันใช้ไฟล์นี้", command=accept_file).pack(side="right", padx=8)
+
+        preview.protocol("WM_DELETE_WINDOW", close_preview)
+        render_page()
+
+    def load_confirmed_pdf(self, selected_path: Path) -> None:
+        try:
+            result = extract_delivery(selected_path)
+            self.pdf_path = selected_path
+            self.result = result
+            self.rows = result.rows
+            self.file_label.configure(
+                text=f"{self.pdf_path}   |   ลูกค้า: {self.result.customer}   |   หน้า QR: {self.result.page_index + 1}"
+            )
             self.refresh()
         except Exception as error:
             messagebox.showerror("อ่าน PDF ไม่สำเร็จ", str(error))
