@@ -474,7 +474,7 @@ class App(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.6.1 - Review & Sign")
+        self.title("Delivery Order QR Generator v0.6.2 - Review & Sign")
         self.geometry("1280x800")
         self.minsize(980, 650)
         self.pdf_path: Path | None = None
@@ -550,10 +550,12 @@ class App(tk.Tk):
             font=("Segoe UI", 10, "bold"), justify="left", anchor="w", wraplength=1200,
             padx=10, pady=7,
         )
-        warning.pack(fill="x", padx=14, pady=(0, 6))
+        # Place the warning and signature controls before the expandable PDF
+        # panes so Windows scaling cannot push Generate below the screen.
+        warning.pack(fill="x", padx=14, pady=(0, 6), before=panes)
 
         sign = ttk.Frame(self)
-        sign.pack(fill="x", padx=14, pady=(0, 10))
+        sign.pack(fill="x", padx=14, pady=(0, 8), before=panes)
         self.ack_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             sign, text="ฉันตรวจสอบข้อมูลกับ PDF ต้นฉบับครบทุกแถวแล้วและยอมรับคำเตือน",

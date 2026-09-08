@@ -1,4 +1,8 @@
-Delivery Order QR Generator v0.6.1 Review & Sign
+Delivery Order QR Generator v0.6.2 Review & Sign
+
+แก้ไขใน v0.6.2
+- ย้ายคำเตือน ช่องลงชื่อ และปุ่ม Generate ไว้เหนือ PDF
+- ปุ่ม Generate มองเห็นตลอด แม้ Windows ใช้ Display Scale สูงหรือจอมีความสูงจำกัด
 
 แก้ไขใน v0.6.1
 - DNTH แบบภาพสแกนอ่านค่าตามลำดับคอลัมน์ ไม่ใช้ช่วงตำแหน่งตายตัว
