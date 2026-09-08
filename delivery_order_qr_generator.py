@@ -8,6 +8,7 @@ import sys
 import tempfile
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -104,6 +105,32 @@ def integer_from_ocr(text: str) -> int | None:
     if not match:
         return None
     return int(round(float(match.group())))
+
+
+def dnth_values_from_ocr_row(words: list[dict]) -> tuple[int | None, int | None]:
+    """Return (boxes, current_qty) from the ordered DNTH numeric columns.
+
+    DNTH scan layouts can move horizontally. Reading a fixed x-range can pick
+    PREVIOUS QTY instead of CURRENT QTY. The stable meaning is the column order:
+    QUANTITY/BOX, NO. OF BOX, PREVIOUS QTY, CURRENT QTY, DIFF QTY.
+    Newer layouts without previous/diff have three numeric columns.
+    """
+    numeric_cells: list[tuple[float, int]] = []
+    for word in words:
+        if not 0.46 <= word["cx"] <= 0.85:
+            continue
+        value = integer_from_ocr(word["text"])
+        if value is not None:
+            numeric_cells.append((word["cx"], value))
+    numeric_cells.sort(key=lambda cell: cell[0])
+    values = [value for _x, value in numeric_cells]
+    if len(values) >= 5:
+        # QTY/BOX, BOX, PREVIOUS, CURRENT, DIFF
+        return values[1], values[3]
+    if len(values) >= 3:
+        # QTY/BOX, BOX, CURRENT (native/new layout without previous/diff)
+        return values[1], values[2]
+    return None, None
 
 
 def extract_dnth_text_rows(page: fitz.Page) -> list[DeliveryRow]:
@@ -218,10 +245,13 @@ def extract_dnth_rows(pdf_path: Path) -> list[DeliveryRow]:
         if part in seen:
             continue
 
-        box_candidates = [integer_from_ocr(w["text"]) for w in words if 0.56 <= w["cx"] <= 0.65]
-        qty_candidates = [integer_from_ocr(w["text"]) for w in words if 0.68 <= w["cx"] <= 0.77]
-        boxes = next((value for value in box_candidates if value is not None), None)
-        qty = next((value for value in qty_candidates if value is not None), None)
+        boxes, qty = dnth_values_from_ocr_row(words)
+        # Compatibility fallback for unusually sparse OCR rows.
+        if boxes is None or qty is None:
+            box_candidates = [integer_from_ocr(w["text"]) for w in words if 0.56 <= w["cx"] <= 0.65]
+            qty_candidates = [integer_from_ocr(w["text"]) for w in words if 0.68 <= w["cx"] <= 0.77]
+            boxes = next((value for value in box_candidates if value is not None), None)
+            qty = next((value for value in qty_candidates if value is not None), None)
         if boxes is None or qty is None:
             continue
         seen.add(part)
@@ -436,170 +466,185 @@ def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> 
 
 
 class App(tk.Tk):
+    WARNING_TEXT = (
+        "คำเตือน: ข้อมูลอ่านจาก PDF ด้วยระบบอัตโนมัติและมีโอกาสผิดพลาด "
+        "กรุณาเปรียบเทียบ Part No., Current QTY และ NO. OF BOX กับ PDF ต้นฉบับให้ครบทุกแถว "
+        "ผู้ตรวจสอบต้องลงชื่อก่อน Generate QR Code"
+    )
+
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.5.3 Portable")
-        self.geometry("850x520")
-        self.minsize(760, 460)
+        self.title("Delivery Order QR Generator v0.6.1 - Review & Sign")
+        self.geometry("1280x800")
+        self.minsize(980, 650)
         self.pdf_path: Path | None = None
+        self.pdf_document: fitz.Document | None = None
+        self.preview_photo: ImageTk.PhotoImage | None = None
+        self.page_index = 0
+        self.zoom = 0.9
         self.rows: list[DeliveryRow] = []
         self.result: ExtractionResult | None = None
+        self.verified_rows: set[int] = set()
+        self.signed_name = ""
+        self.signed_at: datetime | None = None
 
-        ttk.Label(self, text="Delivery Order QR Generator", font=("Segoe UI", 19, "bold")).pack(pady=(18, 4))
-        ttk.Label(self, text="อ่าน Current QTY และ NO. OF BOX แล้วเพิ่ม QR โดยไม่แก้ไฟล์ต้นฉบับ").pack()
+        ttk.Label(self, text="Delivery Order QR Generator", font=("Segoe UI", 19, "bold")).pack(pady=(10, 2))
+        ttk.Label(self, text="เปรียบเทียบ PDF ต้นฉบับกับข้อมูลด้านขวา ก่อนยืนยันและลงชื่อ").pack()
 
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", padx=24, pady=16)
-        ttk.Button(bar, text="1. เลือก Delivery Order PDF", command=self.open_pdf).pack(side="left")
-        ttk.Button(bar, text="2. แก้รายการที่เลือก", command=self.edit_selected).pack(side="left", padx=8)
-        ttk.Button(bar, text="3. สร้าง PDF พร้อม QR", command=self.generate).pack(side="right")
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=14, pady=8)
+        ttk.Button(top, text="1. เลือก Delivery Order PDF", command=self.open_pdf).pack(side="left")
+        self.file_label = ttk.Label(top, text="ยังไม่ได้เลือกไฟล์")
+        self.file_label.pack(side="left", padx=12)
 
-        self.file_label = ttk.Label(self, text="ยังไม่ได้เลือกไฟล์")
-        self.file_label.pack(fill="x", padx=24)
+        panes = ttk.Panedwindow(self, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+        left = ttk.LabelFrame(panes, text="PDF ต้นฉบับ")
+        right = ttk.LabelFrame(panes, text="ข้อมูลที่โปรแกรมอ่านได้ - แก้ไขและยืนยันทีละแถว")
+        panes.add(left, weight=3)
+        panes.add(right, weight=2)
+
+        viewer = ttk.Frame(left)
+        viewer.pack(fill="both", expand=True, padx=6, pady=6)
+        self.canvas = tk.Canvas(viewer, background="#777777", highlightthickness=0)
+        yscroll = ttk.Scrollbar(viewer, orient="vertical", command=self.canvas.yview)
+        xscroll = ttk.Scrollbar(viewer, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        viewer.rowconfigure(0, weight=1)
+        viewer.columnconfigure(0, weight=1)
+
+        nav = ttk.Frame(left)
+        nav.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(nav, text="◀ ก่อนหน้า", command=lambda: self.change_page(-1)).pack(side="left")
+        ttk.Button(nav, text="ถัดไป ▶", command=lambda: self.change_page(1)).pack(side="left", padx=5)
+        self.page_label = ttk.Label(nav, text="หน้า - / -")
+        self.page_label.pack(side="left", padx=10)
+        ttk.Button(nav, text="+ ขยาย", command=lambda: self.change_zoom(0.15)).pack(side="right")
+        ttk.Button(nav, text="− ย่อ", command=lambda: self.change_zoom(-0.15)).pack(side="right", padx=5)
 
         columns = ("part", "qty", "box", "status")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=14)
+        self.tree = ttk.Treeview(right, columns=columns, show="headings", height=14)
         for key, title, width in [
-            ("part", "Part No.", 220), ("qty", "Current QTY", 150),
-            ("box", "NO. OF BOX", 150), ("status", "สถานะ", 220)
+            ("part", "Part No.", 180), ("qty", "Current QTY", 105),
+            ("box", "NO. OF BOX", 95), ("status", "สถานะ", 130),
         ]:
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, anchor="center")
-        self.tree.pack(fill="both", expand=True, padx=24, pady=12)
+        self.tree.tag_configure("pending", foreground="#b42318")
+        self.tree.tag_configure("verified", foreground="#067647")
+        self.tree.pack(fill="both", expand=True, padx=6, pady=6)
         self.tree.bind("<Double-1>", lambda _event: self.edit_selected())
-        ttk.Label(self, text="ต้องตรวจค่าก่อนสร้างทุกครั้ง • QTY = 0 จะไม่สร้าง QR ส่งงาน", foreground="#b42318").pack(pady=(0, 16))
+
+        row_buttons = ttk.Frame(right)
+        row_buttons.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Button(row_buttons, text="แก้รายการ", command=self.edit_selected).pack(side="left")
+        ttk.Button(row_buttons, text="เพิ่มรายการ", command=self.add_row).pack(side="left", padx=5)
+        ttk.Button(row_buttons, text="ยืนยันแถวที่เลือก", command=self.verify_selected).pack(side="right")
+        ttk.Button(row_buttons, text="ยืนยันครบทุกแถว", command=self.verify_all).pack(side="right", padx=5)
+
+        warning = tk.Label(
+            self, text=self.WARNING_TEXT, bg="#fff1f0", fg="#b42318",
+            font=("Segoe UI", 10, "bold"), justify="left", anchor="w", wraplength=1200,
+            padx=10, pady=7,
+        )
+        warning.pack(fill="x", padx=14, pady=(0, 6))
+
+        sign = ttk.Frame(self)
+        sign.pack(fill="x", padx=14, pady=(0, 10))
+        self.ack_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            sign, text="ฉันตรวจสอบข้อมูลกับ PDF ต้นฉบับครบทุกแถวแล้วและยอมรับคำเตือน",
+            variable=self.ack_var, command=self.invalidate_signature,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 5))
+        ttk.Label(sign, text="ชื่อผู้ตรวจสอบ / รหัสพนักงาน:").grid(row=1, column=0, sticky="w")
+        self.signer_var = tk.StringVar()
+        self.signer_entry = ttk.Entry(sign, textvariable=self.signer_var, width=34)
+        self.signer_entry.grid(row=1, column=1, sticky="ew", padx=6)
+        ttk.Button(sign, text="2. ลงชื่อและยืนยัน", command=self.sign_review).grid(row=1, column=2, padx=6)
+        self.generate_button = ttk.Button(sign, text="3. Generate QR Code", command=self.generate, state="disabled")
+        self.generate_button.grid(row=1, column=3, padx=(6, 0), ipadx=12, ipady=4)
+        self.sign_status = ttk.Label(sign, text="ยังไม่ได้ลงชื่อ", foreground="#b42318")
+        self.sign_status.grid(row=2, column=0, columnspan=4, sticky="w", pady=(5, 0))
+        sign.columnconfigure(1, weight=1)
+        self.signer_var.trace_add("write", lambda *_args: self.on_signer_changed())
 
     def refresh(self) -> None:
         self.tree.delete(*self.tree.get_children())
         for index, row in enumerate(self.rows):
-            status = "ไม่สร้าง QR: QTY เป็น 0" if row.current_qty <= 0 else row.confidence
-            self.tree.insert("", "end", iid=str(index), values=(row.part_no, f"{row.current_qty:,}", row.number_of_boxes, status))
+            verified = index in self.verified_rows
+            status = "ตรวจแล้ว" if verified else "รอตรวจ"
+            if row.current_qty <= 0 or row.number_of_boxes <= 0:
+                status += " (ค่าเป็น 0)"
+            self.tree.insert(
+                "", "end", iid=str(index),
+                values=(row.part_no, f"{row.current_qty:,}", row.number_of_boxes, status),
+                tags=("verified" if verified else "pending",),
+            )
+        self.update_generate_state()
 
     def open_pdf(self) -> None:
         selected = filedialog.askopenfilename(title="เลือก Delivery Order", filetypes=[("PDF", "*.pdf")])
         if not selected:
             return
-        self.preview_pdf(Path(selected))
-
-    def preview_pdf(self, selected_path: Path) -> None:
-        """Show every PDF page before accepting the document for extraction."""
-        try:
-            document = fitz.open(selected_path)
-            if document.page_count < 1:
-                document.close()
-                raise ValueError("PDF ไม่มีหน้าเอกสาร")
-        except Exception as error:
-            messagebox.showerror("เปิดตัวอย่าง PDF ไม่สำเร็จ", str(error))
-            return
-
-        preview = tk.Toplevel(self)
-        preview.title("ตรวจสอบไฟล์ Delivery Order ก่อนใช้งาน")
-        # Fit inside the usable screen on small displays and high DPI scaling.
-        # A fixed 760px window can otherwise put the action buttons behind the
-        # Windows taskbar on a 768px-high display.
-        screen_w = preview.winfo_screenwidth()
-        screen_h = preview.winfo_screenheight()
-        window_w = max(680, min(1000, screen_w - 80))
-        window_h = max(500, min(720, screen_h - 140))
-        preview.geometry(f"{window_w}x{window_h}+{max(20, (screen_w - window_w) // 2)}+20")
-        preview.minsize(640, 480)
-        preview.transient(self)
-        preview.grab_set()
-
-        page_index = tk.IntVar(value=0)
-        zoom = tk.DoubleVar(value=1.0)
-        page_text = tk.StringVar()
-        photo_holder: dict[str, ImageTk.PhotoImage] = {}
-
-        ttk.Label(preview, text=selected_path.name, font=("Segoe UI", 12, "bold")).pack(pady=(10, 2))
-        ttk.Label(preview, text=str(selected_path), foreground="#555555").pack(padx=16)
-
-        viewer_frame = ttk.Frame(preview)
-        viewer_frame.pack(fill="both", expand=True, padx=12, pady=10)
-        canvas = tk.Canvas(viewer_frame, background="#777777", highlightthickness=0)
-        vertical = ttk.Scrollbar(viewer_frame, orient="vertical", command=canvas.yview)
-        horizontal = ttk.Scrollbar(viewer_frame, orient="horizontal", command=canvas.xview)
-        canvas.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        vertical.grid(row=0, column=1, sticky="ns")
-        horizontal.grid(row=1, column=0, sticky="ew")
-        viewer_frame.rowconfigure(0, weight=1)
-        viewer_frame.columnconfigure(0, weight=1)
-
-        def render_page() -> None:
-            matrix = fitz.Matrix(1.35 * zoom.get(), 1.35 * zoom.get())
-            pix = document[page_index.get()].get_pixmap(matrix=matrix, alpha=False)
-            image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-            photo = ImageTk.PhotoImage(image)
-            photo_holder["page"] = photo
-            canvas.delete("all")
-            canvas.create_image(12, 12, image=photo, anchor="nw")
-            canvas.configure(scrollregion=(0, 0, image.width + 24, image.height + 24))
-            canvas.xview_moveto(0)
-            canvas.yview_moveto(0)
-            page_text.set(f"หน้า {page_index.get() + 1} / {document.page_count}   •   ซูม {int(zoom.get() * 100)}%")
-
-        def change_page(step: int) -> None:
-            page_index.set(max(0, min(document.page_count - 1, page_index.get() + step)))
-            render_page()
-
-        def change_zoom(step: float) -> None:
-            zoom.set(max(0.6, min(2.0, round(zoom.get() + step, 1))))
-            render_page()
-
-        def close_preview() -> None:
-            document.close()
-            preview.grab_release()
-            preview.destroy()
-
-        def accept_file() -> None:
-            close_preview()
-            self.load_confirmed_pdf(selected_path)
-
-        def choose_another_file() -> None:
-            close_preview()
-            self.after(50, self.open_pdf)
-
-        # Keep navigation and confirmation on separate rows. This prevents the
-        # confirmation button from being pushed off-screen by Windows scaling.
-        navigation = ttk.Frame(preview)
-        navigation.pack(fill="x", padx=12, pady=(0, 6))
-        ttk.Button(navigation, text="◀ หน้าก่อนหน้า", command=lambda: change_page(-1)).pack(side="left")
-        ttk.Button(navigation, text="หน้าถัดไป ▶", command=lambda: change_page(1)).pack(side="left", padx=6)
-        ttk.Label(navigation, textvariable=page_text).pack(side="left", padx=12)
-        ttk.Button(navigation, text="+ ขยาย", command=lambda: change_zoom(0.2)).pack(side="right")
-        ttk.Button(navigation, text="− ย่อ", command=lambda: change_zoom(-0.2)).pack(side="right", padx=6)
-
-        actions = ttk.Frame(preview)
-        actions.pack(fill="x", padx=12, pady=(0, 12))
-        ttk.Button(actions, text="เลือกไฟล์ใหม่", command=choose_another_file).pack(side="left")
-        confirm_button = ttk.Button(actions, text="ยืนยันใช้ไฟล์นี้", command=accept_file)
-        confirm_button.pack(side="right", ipadx=18, ipady=5)
-
-        preview.protocol("WM_DELETE_WINDOW", close_preview)
-        preview.bind("<Return>", lambda _event: accept_file())
-        preview.bind("<Escape>", lambda _event: close_preview())
-        render_page()
-
-    def load_confirmed_pdf(self, selected_path: Path) -> None:
+        selected_path = Path(selected)
         try:
             result = extract_delivery(selected_path)
+            document = fitz.open(selected_path)
+            if self.pdf_document is not None:
+                self.pdf_document.close()
             self.pdf_path = selected_path
+            self.pdf_document = document
             self.result = result
             self.rows = result.rows
-            self.file_label.configure(
-                text=f"{self.pdf_path}   |   ลูกค้า: {self.result.customer}   |   หน้า QR: {self.result.page_index + 1}"
-            )
+            self.page_index = result.page_index
+            self.verified_rows.clear()
+            self.ack_var.set(False)
+            self.reset_signature()
+            self.file_label.configure(text=f"{selected_path.name} | ลูกค้า: {result.customer}")
             self.refresh()
+            self.render_page()
         except Exception as error:
             messagebox.showerror("อ่าน PDF ไม่สำเร็จ", str(error))
 
-    def edit_selected(self) -> None:
+    def render_page(self) -> None:
+        if self.pdf_document is None:
+            return
+        pix = self.pdf_document[self.page_index].get_pixmap(
+            matrix=fitz.Matrix(self.zoom, self.zoom), alpha=False
+        )
+        image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+        self.preview_photo = ImageTk.PhotoImage(image)
+        self.canvas.delete("all")
+        self.canvas.create_image(10, 10, image=self.preview_photo, anchor="nw")
+        self.canvas.configure(scrollregion=(0, 0, image.width + 20, image.height + 20))
+        self.page_label.configure(
+            text=f"หน้า {self.page_index + 1} / {self.pdf_document.page_count} | ซูม {int(self.zoom * 100)}%"
+        )
+
+    def change_page(self, step: int) -> None:
+        if self.pdf_document is None:
+            return
+        self.page_index = max(0, min(self.pdf_document.page_count - 1, self.page_index + step))
+        self.render_page()
+
+    def change_zoom(self, step: float) -> None:
+        self.zoom = max(0.45, min(2.0, round(self.zoom + step, 2)))
+        self.render_page()
+
+    def selected_index(self) -> int | None:
         selected = self.tree.selection()
         if not selected:
-            messagebox.showinfo("เลือกรายการ", "กรุณาเลือกรายการที่ต้องการแก้")
+            messagebox.showinfo("เลือกรายการ", "กรุณาเลือกรายการก่อน")
+            return None
+        return int(selected[0])
+
+    def edit_selected(self) -> None:
+        index = self.selected_index()
+        if index is None:
             return
-        index = int(selected[0])
         row = self.rows[index]
         part = simpledialog.askstring("Part No.", "Part No.", initialvalue=row.part_no, parent=self)
         if part is None:
@@ -614,25 +659,129 @@ class App(tk.Tk):
         if not checked_part:
             messagebox.showerror("Part No. ไม่ถูกต้อง", "กรุณาตรวจ Part No.")
             return
-        self.rows[index] = DeliveryRow(checked_part, qty, boxes, "ผู้ใช้ตรวจแล้ว")
+        self.rows[index] = DeliveryRow(checked_part, qty, boxes, "ผู้ใช้แก้ไข")
+        self.verified_rows.discard(index)
+        self.ack_var.set(False)
+        self.reset_signature()
         self.refresh()
+
+    def add_row(self) -> None:
+        if self.result is None:
+            messagebox.showinfo("ยังไม่มี PDF", "กรุณาเลือก PDF ก่อน")
+            return
+        part = simpledialog.askstring("เพิ่มรายการ", "Part No.", parent=self)
+        if part is None:
+            return
+        qty = simpledialog.askinteger("เพิ่มรายการ", "Current QTY", minvalue=0, parent=self)
+        if qty is None:
+            return
+        boxes = simpledialog.askinteger("เพิ่มรายการ", "NO. OF BOX", minvalue=0, parent=self)
+        if boxes is None:
+            return
+        checked_part = validated_part(part)
+        if not checked_part:
+            messagebox.showerror("Part No. ไม่ถูกต้อง", "กรุณาตรวจ Part No.")
+            return
+        self.rows.append(DeliveryRow(checked_part, qty, boxes, "ผู้ใช้เพิ่ม"))
+        self.ack_var.set(False)
+        self.reset_signature()
+        self.refresh()
+
+    def verify_selected(self) -> None:
+        index = self.selected_index()
+        if index is None:
+            return
+        self.verified_rows.add(index)
+        self.reset_signature()
+        self.refresh()
+
+    def verify_all(self) -> None:
+        if not self.rows:
+            return
+        if not messagebox.askyesno(
+            "ยืนยันการตรวจสอบ",
+            "คุณได้เปรียบเทียบ Part No., Current QTY และ NO. OF BOX กับ PDF ครบทุกแถวแล้วใช่หรือไม่?",
+        ):
+            return
+        self.verified_rows = set(range(len(self.rows)))
+        self.reset_signature()
+        self.refresh()
+
+    def on_signer_changed(self) -> None:
+        if self.signed_name and self.signer_var.get().strip() != self.signed_name:
+            self.reset_signature()
+
+    def invalidate_signature(self) -> None:
+        if self.signed_name:
+            self.reset_signature()
+        else:
+            self.update_generate_state()
+
+    def reset_signature(self) -> None:
+        self.signed_name = ""
+        self.signed_at = None
+        self.sign_status.configure(text="ยังไม่ได้ลงชื่อ", foreground="#b42318")
+        self.update_generate_state()
+
+    def sign_review(self) -> None:
+        if not self.rows or len(self.verified_rows) != len(self.rows):
+            messagebox.showerror("ยังตรวจไม่ครบ", "ต้องยืนยันข้อมูลให้ครบทุกแถวก่อนลงชื่อ")
+            return
+        if not self.ack_var.get():
+            messagebox.showerror("ยังไม่ยอมรับคำเตือน", "กรุณาเลือกช่องยืนยันว่าได้ตรวจสอบข้อมูลกับ PDF แล้ว")
+            return
+        signer = self.signer_var.get().strip()
+        if len(signer) < 2:
+            messagebox.showerror("ยังไม่ได้ลงชื่อ", "กรุณากรอกชื่อผู้ตรวจสอบหรือรหัสพนักงาน")
+            return
+        self.signed_name = signer
+        self.signed_at = datetime.now()
+        self.sign_status.configure(
+            text=f"ลงชื่อแล้ว: {signer} | {self.signed_at.strftime('%d/%m/%Y %H:%M:%S')}",
+            foreground="#067647",
+        )
+        self.update_generate_state()
+
+    def update_generate_state(self) -> None:
+        ready = bool(
+            self.rows and len(self.verified_rows) == len(self.rows)
+            and self.ack_var.get() and self.signed_name and self.signed_at
+        )
+        self.generate_button.configure(state="normal" if ready else "disabled")
 
     def generate(self) -> None:
         if not self.pdf_path or not self.rows or self.result is None:
             messagebox.showinfo("ยังไม่มีข้อมูล", "กรุณาเลือก Delivery Order PDF ก่อน")
             return
+        if len(self.verified_rows) != len(self.rows) or not self.signed_name or self.signed_at is None:
+            messagebox.showerror("ยังไม่พร้อม Generate", "ต้องตรวจครบ ยอมรับคำเตือน และลงชื่อก่อน")
+            return
         destination = filedialog.asksaveasfilename(
             title="บันทึก PDF พร้อม QR",
             initialfile=f"{self.pdf_path.stem}_PM75_ONE_PAGE.pdf",
             defaultextension=".pdf",
-            filetypes=[("PDF", "*.pdf")]
+            filetypes=[("PDF", "*.pdf")],
         )
         if not destination:
             return
         try:
+            output_path = Path(destination)
             self.result.rows = self.rows
-            add_qr_to_pdf(self.pdf_path, Path(destination), self.result)
-            messagebox.showinfo("สำเร็จ", f"สร้างไฟล์แล้ว\n{destination}")
+            add_qr_to_pdf(self.pdf_path, output_path, self.result)
+            audit_path = output_path.with_suffix(".verification.txt")
+            lines = [
+                "CHECK TAG_RS - QR GENERATION VERIFICATION",
+                f"Source PDF: {self.pdf_path}",
+                f"Output PDF: {output_path}",
+                f"Customer: {self.result.customer}",
+                f"Verified by: {self.signed_name}",
+                f"Verified at: {self.signed_at.strftime('%d/%m/%Y %H:%M:%S')}",
+                "Warning accepted: YES",
+                "",
+            ]
+            lines.extend(f"{index + 1}. {row.payload} | VERIFIED" for index, row in enumerate(self.rows))
+            audit_path.write_text("\n".join(lines), encoding="utf-8-sig")
+            messagebox.showinfo("สำเร็จ", f"สร้าง PDF และบันทึกผู้ตรวจสอบแล้ว\n{output_path}\n{audit_path}")
         except Exception as error:
             messagebox.showerror("สร้าง PDF ไม่สำเร็จ", str(error))
 

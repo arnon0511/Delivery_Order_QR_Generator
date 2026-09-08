@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from delivery_order_qr_generator import (
     DeliveryRow,
+    dnth_values_from_ocr_row,
     extract_delivery,
     integer_from_ocr,
     normalized_part,
@@ -25,6 +26,26 @@ class GeneratorTest(unittest.TestCase):
     def test_numeric_ocr_is_rounded_to_integer(self):
         self.assertEqual(1100, integer_from_ocr("1,100.09"))
         self.assertEqual(0, integer_from_ocr("0.00"))
+
+    def test_dnth_ocr_uses_current_not_previous_qty_after_horizontal_shift(self):
+        words = [
+            {"text": "300.00", "cx": 0.535},
+            {"text": "1.00", "cx": 0.630},
+            {"text": "0.00", "cx": 0.702},
+            {"text": "300.00", "cx": 0.769},
+            {"text": "300.00", "cx": 0.835},
+        ]
+        self.assertEqual((1, 300), dnth_values_from_ocr_row(words))
+
+    def test_dnth_ocr_preserves_real_zero_current_qty(self):
+        words = [
+            {"text": "400.00", "cx": 0.535},
+            {"text": "3.00", "cx": 0.630},
+            {"text": "0.00", "cx": 0.702},
+            {"text": "0.00", "cx": 0.769},
+            {"text": "0.00", "cx": 0.835},
+        ]
+        self.assertEqual((3, 0), dnth_values_from_ocr_row(words))
 
     def test_payload_is_stable(self):
         row = DeliveryRow("TG053661-7151", 1100, 11)
