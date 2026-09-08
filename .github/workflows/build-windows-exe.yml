@@ -66,7 +66,7 @@ jobs:
       - name: Upload Windows Portable package
         uses: actions/upload-artifact@v4
         with:
-          name: Delivery-Order-QR-Generator-Windows-Portable-v0.7.0
+          name: Delivery-Order-QR-Generator-Windows-Portable-v0.7.1
           path: dist/Delivery_Order_QR_Generator/
           if-no-files-found: error
           retention-days: 30
