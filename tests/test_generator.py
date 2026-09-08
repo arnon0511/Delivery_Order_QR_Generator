@@ -14,6 +14,7 @@ from delivery_order_qr_generator import (
     integer_from_ocr,
     normalized_part,
     validated_part,
+    validated_manual_part,
 )
 
 
@@ -62,6 +63,10 @@ class GeneratorTest(unittest.TestCase):
 
     def test_invalid_part_is_rejected(self):
         self.assertIsNone(validated_part("PART NUMBER"))
+
+    def test_new_manual_part_format_can_be_confirmed(self):
+        self.assertEqual("NEW.PART/01_A", validated_manual_part(" new.part/01_a "))
+        self.assertIsNone(validated_manual_part("หมายเลขใหม่"))
 
     def test_siam_nsk_report_uses_qty_pcs_and_box_columns(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -99,6 +99,16 @@ def validated_part(text: str) -> str | None:
     return None
 
 
+def validated_manual_part(text: str) -> str | None:
+    """Validate a manually confirmed part without assuming a customer format."""
+    compact = re.sub(r"\s+", "", text.upper())
+    if (2 <= len(compact) <= 50
+            and re.fullmatch(r"[A-Z0-9._/-]+", compact)
+            and any(char.isalnum() for char in compact)):
+        return compact
+    return None
+
+
 def integer_from_ocr(text: str) -> int | None:
     cleaned = text.strip().replace(",", "").replace("O", "0").replace("o", "0")
     match = re.search(r"\d+(?:\.\d+)?", cleaned)
@@ -569,7 +579,7 @@ class App(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.7.1 - Review & Sign")
+        self.title("Delivery Order QR Generator v0.7.2 - Review & Sign")
         self.geometry("1280x800")
         self.minsize(980, 650)
         self.pdf_path: Path | None = None
@@ -763,10 +773,24 @@ class App(tk.Tk):
         if boxes is None:
             return
         checked_part = validated_part(part)
+        is_manual_format = False
+        if not checked_part and (self.result.customer == "MANUAL_UNKNOWN" or row.source.startswith("ผู้ใช้")):
+            checked_part = validated_manual_part(part)
+            is_manual_format = checked_part is not None
         if not checked_part:
-            messagebox.showerror("Part No. ไม่ถูกต้อง", "กรุณาตรวจ Part No.")
+            messagebox.showerror(
+                "Part No. ไม่ถูกต้อง",
+                "กรุณากรอก Part No. ด้วย A-Z, 0-9 หรือเครื่องหมาย - / . _ เท่านั้น",
+            )
             return
-        self.rows[index] = DeliveryRow(checked_part, qty, boxes, "ผู้ใช้แก้ไข")
+        if is_manual_format and not messagebox.askyesno(
+                "ยืนยัน Part No. ใหม่",
+                f"'{checked_part}' ไม่ตรงรูปแบบ Part No. ที่โปรแกรมรู้จัก\n"
+                "กรุณาเทียบกับ PDF แล้วกด Yes เพื่อใช้ข้อมูลนี้",
+                parent=self):
+            return
+        source = "ผู้ใช้แก้ไข - Part No. ใหม่ กรุณาตรวจ" if is_manual_format else "ผู้ใช้แก้ไข"
+        self.rows[index] = DeliveryRow(checked_part, qty, boxes, source)
         self.verified_rows.discard(index)
         self.ack_var.set(False)
         self.reset_signature()
@@ -786,10 +810,24 @@ class App(tk.Tk):
         if boxes is None:
             return
         checked_part = validated_part(part)
+        is_manual_format = False
         if not checked_part:
-            messagebox.showerror("Part No. ไม่ถูกต้อง", "กรุณาตรวจ Part No.")
+            checked_part = validated_manual_part(part)
+            is_manual_format = checked_part is not None
+        if not checked_part:
+            messagebox.showerror(
+                "Part No. ไม่ถูกต้อง",
+                "กรุณากรอก Part No. ด้วย A-Z, 0-9 หรือเครื่องหมาย - / . _ เท่านั้น",
+            )
             return
-        self.rows.append(DeliveryRow(checked_part, qty, boxes, "ผู้ใช้เพิ่ม"))
+        if is_manual_format and not messagebox.askyesno(
+                "ยืนยัน Part No. ใหม่",
+                f"'{checked_part}' ไม่ตรงรูปแบบ Part No. ที่โปรแกรมรู้จัก\n"
+                "กรุณาเทียบกับ PDF แล้วกด Yes เพื่อเพิ่มรายการ",
+                parent=self):
+            return
+        source = "ผู้ใช้เพิ่ม - Part No. ใหม่ กรุณาตรวจ" if is_manual_format else "ผู้ใช้เพิ่ม"
+        self.rows.append(DeliveryRow(checked_part, qty, boxes, source))
         self.ack_var.set(False)
         self.reset_signature()
         self.refresh()
