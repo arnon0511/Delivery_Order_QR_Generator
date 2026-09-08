@@ -8,7 +8,7 @@
 4. กด Run workflow แล้วกดปุ่ม Run workflow สีเขียว
 5. รอจนงานแสดงเครื่องหมายถูกสีเขียว
 6. เปิดผลการรัน แล้วดาวน์โหลด Artifact:
-   Delivery-Order-QR-Generator-Windows-Portable-v0.6.3
+   Delivery-Order-QR-Generator-Windows-Portable-v0.7.0
 7. แตก ZIP ทั้งชุด แล้วเปิด Delivery_Order_QR_Generator.exe
 
 เครื่องผู้ใช้งานไม่ต้องติดตั้ง Python และไม่ต้องติดตั้ง Tesseract OCR

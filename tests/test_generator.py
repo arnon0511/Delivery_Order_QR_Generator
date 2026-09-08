@@ -117,6 +117,40 @@ class GeneratorTest(unittest.TestCase):
                 [(row.part_no, row.current_qty, row.number_of_boxes) for row in result.rows],
             )
 
+    def test_aisin_purchase_uses_order_qty_and_number_of_boxes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "aisin.pdf"
+            document = fitz.open()
+            page = document.new_page(width=595, height=842)
+            page.insert_text((200, 50), "Pick List(PURCHASE)")
+            page.insert_text((380, 250), "Order qty")
+            page.insert_text((450, 240), "# of")
+            page.insert_text((450, 255), "Box")
+            page.insert_text((500, 240), "confirmed")
+            page.insert_text((30, 180), "Total number of box")
+            page.insert_text((75, 275), "31452-S301")
+            page.insert_text((425, 282), "150")
+            page.insert_text((475, 282), "1")
+            document.save(path)
+            document.close()
+            result = extract_delivery(path)
+            self.assertEqual("AISIN_PURCHASE", result.customer)
+            self.assertEqual([("31452-S301", 150, 1)], [
+                (row.part_no, row.current_qty, row.number_of_boxes) for row in result.rows
+            ])
+
+    def test_unknown_pdf_opens_in_manual_mode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "unknown.pdf"
+            document = fitz.open()
+            page = document.new_page()
+            page.insert_text((72, 72), "UNSUPPORTED CUSTOMER DOCUMENT")
+            document.save(path)
+            document.close()
+            result = extract_delivery(path)
+            self.assertEqual("MANUAL_UNKNOWN", result.customer)
+            self.assertEqual([], result.rows)
+
 
 if __name__ == "__main__":
     unittest.main()

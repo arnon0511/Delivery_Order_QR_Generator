@@ -316,6 +316,56 @@ def extract_siam_nsk_rows(page: fitz.Page) -> list[DeliveryRow]:
     return sorted(rows, key=lambda row: row.source_y or 0)
 
 
+def extract_aisin_purchase_rows(page: fitz.Page) -> list[DeliveryRow]:
+    """Read AISIN Pick List(PURCHASE): AISIN Part, Order qty and # of Box."""
+    words = page.get_text("words")
+    if not re.search(r"PICK\s+LIST\s*\(PURCHASE\)", page.get_text().upper()):
+        return []
+
+    def cx(word: tuple) -> float:
+        return (word[0] + word[2]) / 2
+
+    def cy(word: tuple) -> float:
+        return (word[1] + word[3]) / 2
+
+    order_words = [word for word in words if word[4].upper() == "ORDER" and cy(word) > 200]
+    box_words = [word for word in words if word[4].upper() == "BOX" and cy(word) > 200]
+    if not order_words or not box_words:
+        return []
+    order_word_x = max(cx(word) for word in order_words)
+    order_qty_word_x = min(
+        (cx(word) for word in words
+         if word[4].upper() == "QTY" and order_word_x < cx(word) < order_word_x + 45),
+        default=order_word_x + 20,
+    )
+    order_x = (order_word_x + order_qty_word_x) / 2
+    box_x = max(cx(word) for word in box_words)
+    # Numeric cells are right-aligned; the Order qty value can sit close to
+    # the left edge of the following # of Box header.
+    split_x = box_x
+    next_x = min(
+        (cx(word) for word in words if word[4].upper() == "CONFIRMED" and cx(word) > box_x),
+        default=page.rect.width,
+    )
+
+    rows: list[DeliveryRow] = []
+    for word in words:
+        part = validated_part(word[4])
+        if not part or not 60 <= cx(word) <= 220 or cy(word) <= 255:
+            continue
+        row_y = cy(word)
+        same_row = [candidate for candidate in words if abs(cy(candidate) - row_y) <= 12]
+        qty_values = [integer_from_ocr(candidate[4]) for candidate in same_row
+                      if order_x - 25 <= cx(candidate) < split_x]
+        box_values = [integer_from_ocr(candidate[4]) for candidate in same_row
+                      if split_x <= cx(candidate) < (box_x + next_x) / 2]
+        qty = next((value for value in qty_values if value is not None), None)
+        boxes = next((value for value in box_values if value is not None), None)
+        if qty is not None and boxes is not None:
+            rows.append(DeliveryRow(part, qty, boxes, "อ่านจาก AISIN PURCHASE - กรุณาตรวจ", row_y))
+    return rows
+
+
 def normalize_document_part(text: str) -> str:
     return re.sub(r"\s+", "", text.upper())
 
@@ -323,6 +373,13 @@ def normalize_document_part(text: str) -> str:
 def extract_delivery(pdf_path: Path) -> ExtractionResult:
     document = fitz.open(pdf_path)
     page_texts = [page.get_text().upper() for page in document]
+
+    for index, text in enumerate(page_texts):
+        if (re.search(r"PICK\s+LIST\s*\(PURCHASE\)", text)
+                and re.search(r"TOTAL\s+NUMBER\s+OF\s+BOX", text)):
+            rows = extract_aisin_purchase_rows(document[index])
+            if rows:
+                return ExtractionResult("AISIN_PURCHASE", index, rows)
 
     for index, text in enumerate(page_texts):
         if "PARTS DELIVERY REPORT" in text and "SIAM NSK" in text:
@@ -342,8 +399,12 @@ def extract_delivery(pdf_path: Path) -> ExtractionResult:
             if rows:
                 return ExtractionResult("JTCS", index, rows)
 
-    rows = extract_dnth_rows(pdf_path)
-    return ExtractionResult("DNTH", 0, rows)
+    try:
+        rows = extract_dnth_rows(pdf_path)
+        return ExtractionResult("DNTH", 0, rows)
+    except ValueError:
+        # Unknown documents remain usable through the side-by-side manual mode.
+        return ExtractionResult("MANUAL_UNKNOWN", 0, [])
 
 
 def make_qr_png(payload: str) -> bytes:
@@ -446,6 +507,21 @@ def add_qr_to_pdf(source: Path, destination: Path, result: ExtractionResult) -> 
         _write_dnth_single_page(source, destination, rows)
         return
 
+    if result.customer == "MANUAL_UNKNOWN":
+        source_document = fitz.open(source)
+        document = fitz.open()
+        document.insert_pdf(source_document)
+        page = document.new_page(width=595, height=842)
+        page.insert_text((36, 42), "CHECK TAG_RS - MANUAL VERIFIED QR", fontsize=14)
+        rects = _card_rectangles("DNTH", page, len(active))
+        if any(rect.y1 > page.rect.height - 30 for rect in rects):
+            raise ValueError("รายการมากเกินพื้นที่หน้า QR กรุณาแบ่งเอกสาร")
+        for rect, row in zip(rects, active):
+            page.insert_image(rect, stream=make_qr_card(row), keep_proportion=True, overlay=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        document.save(destination, garbage=4, deflate=True)
+        return
+
     source_document = fitz.open(source)
     document = fitz.open()
     document.insert_pdf(
@@ -474,7 +550,7 @@ class App(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.6.3 - Review & Sign")
+        self.title("Delivery Order QR Generator v0.7.0 - Review & Sign")
         self.geometry("1280x800")
         self.minsize(980, 650)
         self.pdf_path: Path | None = None
@@ -612,6 +688,12 @@ class App(tk.Tk):
             self.file_label.configure(text=f"{selected_path.name} | ลูกค้า: {result.customer}")
             self.refresh()
             self.render_page()
+            if result.customer == "MANUAL_UNKNOWN":
+                messagebox.showwarning(
+                    "ไม่รู้จักรูปแบบเอกสาร",
+                    "โปรแกรมยังไม่มีรูปแบบนี้ในรายการ PDF จะแสดงด้านซ้าย กรุณากด 'เพิ่มรายการ' "
+                    "แล้วกรอก Part No., Current QTY และ NO. OF BOX ด้วยตนเอง",
+                )
         except Exception as error:
             messagebox.showerror("อ่าน PDF ไม่สำเร็จ", str(error))
 

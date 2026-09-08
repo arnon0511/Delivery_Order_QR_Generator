@@ -1,4 +1,10 @@
-Delivery Order QR Generator v0.6.3 Review & Sign
+Delivery Order QR Generator v0.7.0 Review & Sign
+
+เพิ่มใน v0.7.0
+- รองรับ AISIN Pick List(PURCHASE) แยกเป็นรูปแบบที่รู้จัก
+- AISIN ใช้ AISIN Part #, Order qty และ # of Box
+- เอกสารที่ไม่รู้จักยังเปิด PDF และเข้าสู่โหมดกรอกเอง
+- โหมดกรอกเองสร้างหน้า QR แยกต่อท้าย เพื่อไม่ทับเอกสารต้นฉบับ
 
 แก้ไขใน v0.6.3
 - ย้ายปุ่มแก้รายการ เพิ่มรายการ และยืนยันข้อมูลไว้เหนือตาราง
