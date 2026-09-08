@@ -474,7 +474,7 @@ class App(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.6.2 - Review & Sign")
+        self.title("Delivery Order QR Generator v0.6.3 - Review & Sign")
         self.geometry("1280x800")
         self.minsize(980, 650)
         self.pdf_path: Path | None = None
@@ -517,7 +517,7 @@ class App(tk.Tk):
         viewer.columnconfigure(0, weight=1)
 
         nav = ttk.Frame(left)
-        nav.pack(fill="x", padx=6, pady=(0, 6))
+        nav.pack(fill="x", padx=6, pady=(0, 6), before=viewer)
         ttk.Button(nav, text="◀ ก่อนหน้า", command=lambda: self.change_page(-1)).pack(side="left")
         ttk.Button(nav, text="ถัดไป ▶", command=lambda: self.change_page(1)).pack(side="left", padx=5)
         self.page_label = ttk.Label(nav, text="หน้า - / -")
@@ -539,11 +539,15 @@ class App(tk.Tk):
         self.tree.bind("<Double-1>", lambda _event: self.edit_selected())
 
         row_buttons = ttk.Frame(right)
-        row_buttons.pack(fill="x", padx=6, pady=(0, 6))
+        row_buttons.pack(fill="x", padx=6, pady=(0, 6), before=self.tree)
         ttk.Button(row_buttons, text="แก้รายการ", command=self.edit_selected).pack(side="left")
         ttk.Button(row_buttons, text="เพิ่มรายการ", command=self.add_row).pack(side="left", padx=5)
         ttk.Button(row_buttons, text="ยืนยันแถวที่เลือก", command=self.verify_selected).pack(side="right")
         ttk.Button(row_buttons, text="ยืนยันครบทุกแถว", command=self.verify_all).pack(side="right", padx=5)
+
+        table_scroll = ttk.Scrollbar(right, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=table_scroll.set)
+        table_scroll.pack(side="right", fill="y", padx=(0, 6), pady=6, before=self.tree)
 
         warning = tk.Label(
             self, text=self.WARNING_TEXT, bg="#fff1f0", fg="#b42318",
