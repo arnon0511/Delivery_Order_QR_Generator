@@ -1,4 +1,9 @@
-Delivery Order QR Generator v0.7.0 Review & Sign
+Delivery Order QR Generator v0.7.1 Review & Sign
+
+แก้ไขใน v0.7.1
+- เอกสารรูปแบบใหม่ที่มีข้อความใน PDF จะเข้าสู่โหมดกรอกเองโดยไม่เรียก OCR
+- ปิดไฟล์ PDF ทุกครั้งหลังอ่าน ป้องกัน Windows แจ้งว่าไฟล์กำลังถูกใช้งาน
+- โหมดกรอกเองทำงานได้แม้เครื่องทดสอบยังหา Tesseract ไม่พบ
 
 เพิ่มใน v0.7.0
 - รองรับ AISIN Pick List(PURCHASE) แยกเป็นรูปแบบที่รู้จัก

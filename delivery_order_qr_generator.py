@@ -209,12 +209,15 @@ def extract_dnth_text_rows(page: fitz.Page) -> list[DeliveryRow]:
 def extract_dnth_rows(pdf_path: Path) -> list[DeliveryRow]:
     document = fitz.open(pdf_path)
     if document.page_count < 1:
+        document.close()
         raise ValueError("PDF ไม่มีหน้าเอกสาร")
     page = document[0]
     text_rows = extract_dnth_text_rows(page)
     if text_rows:
+        document.close()
         return text_rows
     pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+    document.close()
     image = Image.open(io.BytesIO(pix.tobytes("png")))
     data = pytesseract.image_to_data(
         image, config="--psm 6", output_type=pytesseract.Output.DICT
@@ -372,32 +375,48 @@ def normalize_document_part(text: str) -> str:
 
 def extract_delivery(pdf_path: Path) -> ExtractionResult:
     document = fitz.open(pdf_path)
-    page_texts = [page.get_text().upper() for page in document]
+    try:
+        page_texts = [page.get_text().upper() for page in document]
 
-    for index, text in enumerate(page_texts):
-        if (re.search(r"PICK\s+LIST\s*\(PURCHASE\)", text)
-                and re.search(r"TOTAL\s+NUMBER\s+OF\s+BOX", text)):
-            rows = extract_aisin_purchase_rows(document[index])
-            if rows:
-                return ExtractionResult("AISIN_PURCHASE", index, rows)
+        for index, text in enumerate(page_texts):
+            if (re.search(r"PICK\s+LIST\s*\(PURCHASE\)", text)
+                    and re.search(r"TOTAL\s+NUMBER\s+OF\s+BOX", text)):
+                rows = extract_aisin_purchase_rows(document[index])
+                if rows:
+                    return ExtractionResult("AISIN_PURCHASE", index, rows)
 
-    for index, text in enumerate(page_texts):
-        if "PARTS DELIVERY REPORT" in text and "SIAM NSK" in text:
-            rows = extract_siam_nsk_rows(document[index])
-            if rows:
-                return ExtractionResult("SIAM_NSK", index, rows)
+        for index, text in enumerate(page_texts):
+            if "PARTS DELIVERY REPORT" in text and "SIAM NSK" in text:
+                rows = extract_siam_nsk_rows(document[index])
+                if rows:
+                    return ExtractionResult("SIAM_NSK", index, rows)
 
-    for index, text in enumerate(page_texts):
-        if "PART DELIVERY SHEET" in text and "ORDER" in text and "KANBANS" in text:
-            rows = extract_jath_rows(document[index])
-            if rows:
-                return ExtractionResult("JATH", index, rows)
+        for index, text in enumerate(page_texts):
+            if "PART DELIVERY SHEET" in text and "ORDER" in text and "KANBANS" in text:
+                rows = extract_jath_rows(document[index])
+                if rows:
+                    return ExtractionResult("JATH", index, rows)
 
-    for index, text in enumerate(page_texts):
-        if "SUPPLIER MANIFEST" in text and "CONTAINERS" in text:
-            rows = extract_jtcs_rows(document[index])
-            if rows:
-                return ExtractionResult("JTCS", index, rows)
+        for index, text in enumerate(page_texts):
+            if "SUPPLIER MANIFEST" in text and "CONTAINERS" in text:
+                rows = extract_jtcs_rows(document[index])
+                if rows:
+                    return ExtractionResult("JTCS", index, rows)
+
+        has_native_text = any(text.strip() for text in page_texts)
+        looks_like_dnth = any(
+            "DENSO THAILAND" in text
+            or "DNTH" in text
+            or "KANBAN DELIVERY ORDER" in text
+            for text in page_texts
+        )
+    finally:
+        document.close()
+
+    # Unknown text-based layouts go directly to manual entry. OCR is reserved
+    # for scanned documents and DNTH layouts that genuinely require it.
+    if has_native_text and not looks_like_dnth:
+        return ExtractionResult("MANUAL_UNKNOWN", 0, [])
 
     try:
         rows = extract_dnth_rows(pdf_path)
@@ -550,7 +569,7 @@ class App(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Delivery Order QR Generator v0.7.0 - Review & Sign")
+        self.title("Delivery Order QR Generator v0.7.1 - Review & Sign")
         self.geometry("1280x800")
         self.minsize(980, 650)
         self.pdf_path: Path | None = None
